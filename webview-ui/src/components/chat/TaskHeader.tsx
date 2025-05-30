@@ -11,8 +11,9 @@ import Thumbnails from "@/components/common/Thumbnails"
 import { normalizeApiConfiguration } from "@/components/settings/ApiOptions"
 import { validateSlashCommand } from "@/utils/slash-commands"
 import TaskTimeline from "./TaskTimeline"
-import { TaskServiceClient } from "@/services/grpc-client"
+import { TaskServiceClient, FileServiceClient, UiServiceClient } from "@/services/grpc-client"
 import HeroTooltip from "@/components/common/HeroTooltip"
+const { IS_DEV } = process.env
 
 interface TaskHeaderProps {
 	task: ClineMessage
@@ -24,6 +25,7 @@ interface TaskHeaderProps {
 	totalCost: number
 	lastApiReqTotalTokens?: number
 	onClose: () => void
+	onScrollToMessage?: (messageIndex: number) => void
 }
 
 const TaskHeader: React.FC<TaskHeaderProps> = ({
@@ -36,8 +38,10 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 	totalCost,
 	lastApiReqTotalTokens,
 	onClose,
+	onScrollToMessage,
 }) => {
-	const { apiConfiguration, currentTaskItem, checkpointTrackerErrorMessage, clineMessages } = useExtensionState()
+	const { apiConfiguration, currentTaskItem, checkpointTrackerErrorMessage, clineMessages, navigateToSettings } =
+		useExtensionState()
 	const [isTaskExpanded, setIsTaskExpanded] = useState(true)
 	const [isTextExpanded, setIsTextExpanded] = useState(false)
 	const [showSeeMore, setShowSeeMore] = useState(false)
@@ -143,6 +147,8 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 			((cacheReads !== undefined && cacheReads > 0) || (cacheWrites !== undefined && cacheWrites > 0))
 		)
 	}
+
+	console.log("IS_DEV", { IS_DEV, isItTrue: IS_DEV === '"true"' })
 
 	const ContextWindowComponent = (
 		<>
@@ -256,7 +262,11 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 								Task
 								{!isTaskExpanded && ":"}
 							</span>
-							{!isTaskExpanded && <span style={{ marginLeft: 4 }}>{highlightText(task.text, false)}</span>}
+							{!isTaskExpanded && (
+								<span className="ph-no-capture" style={{ marginLeft: 4 }}>
+									{highlightText(task.text, false)}
+								</span>
+							)}
 						</div>
 					</div>
 					{isCostAvailable && (
@@ -302,7 +312,7 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 									wordBreak: "break-word",
 									overflowWrap: "anywhere",
 								}}>
-								{highlightText(task.text, false)}
+								<span className="ph-no-capture">{highlightText(task.text, false)}</span>
 							</div>
 							{!isTextExpanded && showSeeMore && (
 								<div
@@ -347,7 +357,9 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 								See less
 							</div>
 						)}
-						{task.images && task.images.length > 0 && <Thumbnails images={task.images} />}
+						{((task.images && task.images.length > 0) || (task.files && task.files.length > 0)) && (
+							<Thumbnails images={task.images ?? []} files={task.files ?? []} />
+						)}
 
 						<div
 							style={{
@@ -400,7 +412,11 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 									</HeroTooltip>
 								</div>
 								{!shouldShowPromptCacheInfo() && (
-									<DeleteButton taskSize={formatSize(currentTaskItem?.size)} taskId={currentTaskItem?.id} />
+									<div className="flex items-center flex-wrap">
+										<CopyButton taskText={task.text} />
+										{IS_DEV === '"true"' && <TaskFolderButton taskId={currentTaskItem?.id} />}
+										<DeleteButton taskSize={formatSize(currentTaskItem?.size)} taskId={currentTaskItem?.id} />
+									</div>
 								)}
 							</div>
 							{shouldShowPromptCacheInfo() && (
@@ -452,11 +468,15 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 											</HeroTooltip>
 										)}
 									</div>
-									<DeleteButton taskSize={formatSize(currentTaskItem?.size)} taskId={currentTaskItem?.id} />
+									<div className="flex items-center flex-wrap">
+										<CopyButton taskText={task.text} />
+										{IS_DEV === '"true"' && <TaskFolderButton taskId={currentTaskItem?.id} />}
+										<DeleteButton taskSize={formatSize(currentTaskItem?.size)} taskId={currentTaskItem?.id} />
+									</div>
 								</div>
 							)}
 							<div className="flex flex-col">
-								<TaskTimeline messages={clineMessages} />
+								<TaskTimeline messages={clineMessages} onBlockClick={onScrollToMessage} />
 								{ContextWindowComponent}
 							</div>
 							{checkpointTrackerErrorMessage && (
@@ -473,20 +493,23 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 										{checkpointTrackerErrorMessage.replace(/disabling checkpoints\.$/, "")}
 										{checkpointTrackerErrorMessage.endsWith("disabling checkpoints.") && (
 											<>
-												<a
+												<button
 													onClick={() => {
-														vscode.postMessage({
-															type: "openExtensionSettings",
-															text: "enableCheckpoints",
-														})
+														// First open the settings panel using direct navigation
+														navigateToSettings()
+
+														// After a short delay, send a message to scroll to settings
+														setTimeout(async () => {
+															try {
+																await UiServiceClient.scrollToSettings({ value: "features" })
+															} catch (error) {
+																console.error("Error scrolling to checkpoint settings:", error)
+															}
+														}, 300)
 													}}
-													style={{
-														color: "inherit",
-														textDecoration: "underline",
-														cursor: "pointer",
-													}}>
+													className="underline cursor-pointer bg-transparent border-0 p-0 text-inherit font-inherit">
 													disabling checkpoints.
-												</a>
+												</button>
 											</>
 										)}
 										{checkpointTrackerErrorMessage.includes("Git must be installed to use checkpoints.") && (
@@ -587,7 +610,7 @@ export const highlightMentions = (text: string, withShadow = true) => {
 					key={index}
 					className={withShadow ? "mention-context-highlight-with-shadow" : "mention-context-highlight"}
 					style={{ cursor: "pointer" }}
-					onClick={() => vscode.postMessage({ type: "openMention", text: part })}>
+					onClick={() => FileServiceClient.openMention({ value: part })}>
 					@{part}
 				</span>
 			)
@@ -617,6 +640,66 @@ export const highlightText = (text?: string, withShadow = true) => {
 	}
 
 	return [text]
+}
+
+const CopyButton: React.FC<{
+	taskText?: string
+}> = ({ taskText }) => {
+	const [copied, setCopied] = useState(false)
+
+	const handleCopy = () => {
+		if (!taskText) return
+
+		navigator.clipboard.writeText(taskText).then(() => {
+			setCopied(true)
+			setTimeout(() => setCopied(false), 1500)
+		})
+	}
+
+	return (
+		<HeroTooltip content="Copy Task">
+			<VSCodeButton
+				appearance="icon"
+				onClick={handleCopy}
+				style={{ padding: "0px 0px" }}
+				className="p-0"
+				aria-label="Copy Task">
+				<div className="flex items-center gap-[3px] text-[8px] font-bold opacity-60">
+					<i className={`codicon codicon-${copied ? "check" : "copy"}`} />
+				</div>
+			</VSCodeButton>
+		</HeroTooltip>
+	)
+}
+
+const TaskFolderButton: React.FC<{
+	taskId?: string
+}> = ({ taskId }) => {
+	const [copied, setCopied] = useState(false)
+
+	const handleCopy = () => {
+		if (!taskId) return
+
+		navigator.clipboard.writeText(taskId).then(() => {
+			setCopied(true)
+			setTimeout(() => setCopied(false), 1500)
+		})
+	}
+
+	return (
+		<HeroTooltip content="Copy Task ID">
+			<VSCodeButton
+				appearance="icon"
+				onClick={handleCopy}
+				style={{ padding: "0px 0px" }}
+				className="p-0"
+				aria-label="Copy Task ID">
+				<div className="flex items-center gap-[3px] text-[8px] font-bold opacity-60">
+					<i className={`codicon codicon-${copied ? "check" : "folder"}`} />
+				</div>
+			</VSCodeButton>
+		</HeroTooltip>
+	)
 }
 
 const DeleteButton: React.FC<{
